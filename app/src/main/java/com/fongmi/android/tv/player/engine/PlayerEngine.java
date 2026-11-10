@@ -1,5 +1,7 @@
 package com.fongmi.android.tv.player.engine;
 
+import androidx.media3.common.C;
+import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Effect;
 import androidx.media3.common.Format;
 import androidx.media3.common.MediaEdition;
@@ -9,6 +11,7 @@ import androidx.media3.common.Player;
 import androidx.media3.common.Tracks;
 
 import com.fongmi.android.tv.bean.Track;
+import com.fongmi.android.tv.player.AudioPlaybackDiagnostics;
 import com.fongmi.android.tv.player.PlaybackRoute;
 import com.fongmi.android.tv.player.PlaybackResourceClassifier;
 import com.fongmi.android.tv.player.PlaybackTrace;
@@ -89,6 +92,9 @@ public interface PlayerEngine {
     default void setNativeLutShader(MpvLutShader shader) {
     }
 
+    default void setNativeLutPreviewProgress(float progress) {
+    }
+
     default Format getVideoFormat() {
         return null;
     }
@@ -108,6 +114,25 @@ public interface PlayerEngine {
 
     default String getRuntimeDiagnostics() {
         return "";
+    }
+
+    /** Renderer-specific GPU timing/load. Implementations must label non-system estimates. */
+    default String getGpuLoadDiagnostics() {
+        return "";
+    }
+
+    /** Enables renderer-specific sampling only while the diagnostics panel is visible. */
+    default void setGpuLoadDiagnosticsEnabled(boolean enabled) {
+    }
+
+    /** Source-track identity and runtime decode/output facts for the selected video track. */
+    default VideoPlaybackDetails getVideoPlaybackDetails() {
+        return VideoPlaybackDetails.empty();
+    }
+
+    /** Actual runtime audio decode and AudioTrack/AO output facts. */
+    default AudioPlaybackDiagnostics.Snapshot getAudioPlaybackDiagnostics() {
+        return AudioPlaybackDiagnostics.Snapshot.empty();
     }
 
     default long getDroppedFrames() {
@@ -135,6 +160,17 @@ public interface PlayerEngine {
     }
 
     default boolean supportsSecondarySubtitle() {
+        return false;
+    }
+
+    default boolean isPrimarySubtitleSelected(Format format) {
+        if (format == null || isSecondarySubtitleSelected(format)) return false;
+        for (Tracks.Group group : getCurrentTracks().getGroups()) {
+            if (group.getType() != C.TRACK_TYPE_TEXT) continue;
+            for (int i = 0; i < group.length; i++) {
+                if (group.isTrackSelected(i) && format.equals(group.getTrackFormat(i))) return true;
+            }
+        }
         return false;
     }
 
@@ -218,6 +254,55 @@ public interface PlayerEngine {
         public static PlaybackFactsSnapshot empty() {
             return new PlaybackFactsSnapshot(null, null, null, null, "", "",
                     DecoderKind.UNKNOWN, null, "", "", null);
+        }
+    }
+
+    record VideoPlaybackDetails(
+            String sourceCodecs,
+            int dolbyVisionProfile,
+            int dolbyVisionLevel,
+            String decodedCodec,
+            String decoderName,
+            String hwdecCurrent,
+            ColorInfo outputColorInfo,
+            boolean dolbyVisionHdr10Fallback,
+            boolean dolbyVisionP81Conversion) {
+
+        public VideoPlaybackDetails(
+                String sourceCodecs,
+                int dolbyVisionProfile,
+                int dolbyVisionLevel,
+                String decodedCodec,
+                String decoderName,
+                String hwdecCurrent,
+                ColorInfo outputColorInfo,
+                boolean dolbyVisionHdr10Fallback) {
+            this(sourceCodecs, dolbyVisionProfile, dolbyVisionLevel,
+                    decodedCodec, decoderName, hwdecCurrent, outputColorInfo,
+                    dolbyVisionHdr10Fallback, false);
+        }
+
+        public VideoPlaybackDetails {
+            sourceCodecs = sourceCodecs == null ? "" : sourceCodecs;
+            decodedCodec = decodedCodec == null ? "" : decodedCodec;
+            decoderName = decoderName == null ? "" : decoderName;
+            hwdecCurrent = hwdecCurrent == null ? "" : hwdecCurrent;
+        }
+
+        public boolean hasDolbyVisionSource() {
+            return dolbyVisionProfile > 0;
+        }
+
+        public boolean hasEvidence() {
+            return hasDolbyVisionSource() || !sourceCodecs.isEmpty()
+                    || !decodedCodec.isEmpty() || !decoderName.isEmpty()
+                    || !hwdecCurrent.isEmpty() || outputColorInfo != null
+                    || dolbyVisionHdr10Fallback || dolbyVisionP81Conversion;
+        }
+
+        public static VideoPlaybackDetails empty() {
+            return new VideoPlaybackDetails("", C.INDEX_UNSET, C.INDEX_UNSET,
+                    "", "", "", null, false);
         }
     }
 

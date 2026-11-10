@@ -14,6 +14,16 @@ import static org.junit.Assert.assertTrue;
 public class PlaybackPerformanceUiPolicyTest {
 
     @Test
+    public void felIsDescribedOnlyInTheMpvCatalog() {
+        for (int kernel : new int[]{PlayerSetting.MPV, PlayerSetting.EXO}) {
+            PlaybackPerformanceOption option = PlaybackPerformanceCatalog.forKernel(kernel, false)
+                    .stream().filter(item -> item.id().equals(PlaybackPerformanceCatalog.DV7_HDR10_FALLBACK))
+                    .findFirst().orElseThrow();
+            assertEquals(kernel == PlayerSetting.MPV, option.description().contains("FEL 双层重建"));
+        }
+    }
+
+    @Test
     public void everyKernelSeparatesProfileCommonAndAdvancedWithoutLoss() {
         for (int kernel : new int[]{
                 PlayerSetting.EXO, PlayerSetting.MPV, PlayerSetting.IJK}) {
@@ -50,10 +60,12 @@ public class PlaybackPerformanceUiPolicyTest {
         assertEquals(Set.of(
                         PlaybackPerformanceCatalog.MPV_OUTPUT,
                         PlaybackPerformanceCatalog.MPV_RENDER,
+                        PlaybackPerformanceCatalog.MPV_VULKAN_BACKEND,
                         PlaybackPerformanceCatalog.MPV_HWDEC,
                         PlaybackPerformanceCatalog.MPV_FRAME_RATE,
                         PlaybackPerformanceCatalog.MPV_OPTION_PRIORITY,
-                        PlaybackPerformanceCatalog.AUDIO_PASSTHROUGH),
+                        PlaybackPerformanceCatalog.AUDIO_PASSTHROUGH,
+                        PlaybackPerformanceCatalog.MPV_MULTICHANNEL_AUDIO),
                 ids(PlaybackPerformanceUiPolicy
                         .splitForKernel(PlayerSetting.MPV, false).common()));
         assertEquals(Set.of(
@@ -67,6 +79,16 @@ public class PlaybackPerformanceUiPolicyTest {
     }
 
     @Test
+    public void vulkanBackendRowOnlyAppearsAfterAppSelectsVulkan() {
+        assertFalse(ids(PlaybackPerformanceUiPolicy.splitForKernel(
+                PlayerSetting.MPV, false, false).common()).contains(
+                PlaybackPerformanceCatalog.MPV_VULKAN_BACKEND));
+        assertTrue(ids(PlaybackPerformanceUiPolicy.splitForKernel(
+                PlayerSetting.MPV, false, true).common()).contains(
+                PlaybackPerformanceCatalog.MPV_VULKAN_BACKEND));
+    }
+
+    @Test
     public void helpDescriptionsCoverEveryParameter() {
         for (int kernel : new int[]{
                 PlayerSetting.EXO, PlayerSetting.MPV, PlayerSetting.IJK}) {
@@ -77,6 +99,19 @@ public class PlaybackPerformanceUiPolicyTest {
                 assertTrue(option.description().length() >= 40);
             }
         }
+    }
+
+    @Test
+    public void dv7FallbackControlIsAvailableForExoAndMpv() {
+        assertTrue(ids(PlaybackPerformanceCatalog.forKernel(
+                PlayerSetting.EXO, false)).contains(
+                PlaybackPerformanceCatalog.DV7_HDR10_FALLBACK));
+        assertTrue(ids(PlaybackPerformanceCatalog.forKernel(
+                PlayerSetting.MPV, false)).contains(
+                PlaybackPerformanceCatalog.DV7_HDR10_FALLBACK));
+        assertFalse(ids(PlaybackPerformanceCatalog.forKernel(
+                PlayerSetting.IJK, false)).contains(
+                PlaybackPerformanceCatalog.DV7_HDR10_FALLBACK));
     }
 
     private static Set<String> ids(

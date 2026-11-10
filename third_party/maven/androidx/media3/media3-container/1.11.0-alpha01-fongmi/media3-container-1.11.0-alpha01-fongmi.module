@@ -35,11 +35,11 @@
         {
           "name": "media3-container-1.11.0-alpha01-fongmi.aar",
           "url": "media3-container-1.11.0-alpha01-fongmi.aar",
-          "size": 67379,
-          "sha512": "5f042f6bb1cce9ab038e5d6b50323a9cb41d18370903aaaad977cbde3a0bcfb67513494c88088310031251e1b603c2267594b9795d19b85c7d6429ad521c3b24",
-          "sha256": "93e2926c8bf1835db3b97390ca02e19bf22ff8f3d359cb914f5400ffdf291af7",
-          "sha1": "18b1ac3dbd7b4a36299bfed581ad10f4cd1eeb7d",
-          "md5": "f0d628c3a0080334e81b7fb7e2f5deae"
+          "size": 67465,
+          "sha512": "2c2302547bff32392e289adfbb903391acf12edb33bb101aa7d28ed16e200461e25ea5a26ccc215fbf501ffa89d771e8c5c5ff4e5206a54e431cebe08de82e77",
+          "sha256": "db23c133556a03df178090eef482ce427ae33f8e2d639ee82bdb6911b79b01e3",
+          "sha1": "8e7be155fbeb2268527d76f700aa8fa22c3850de",
+          "md5": "121402106ba85023fbc12520aa91b238"
         }
       ]
     },
@@ -71,11 +71,11 @@
         {
           "name": "media3-container-1.11.0-alpha01-fongmi.aar",
           "url": "media3-container-1.11.0-alpha01-fongmi.aar",
-          "size": 67379,
-          "sha512": "5f042f6bb1cce9ab038e5d6b50323a9cb41d18370903aaaad977cbde3a0bcfb67513494c88088310031251e1b603c2267594b9795d19b85c7d6429ad521c3b24",
-          "sha256": "93e2926c8bf1835db3b97390ca02e19bf22ff8f3d359cb914f5400ffdf291af7",
-          "sha1": "18b1ac3dbd7b4a36299bfed581ad10f4cd1eeb7d",
-          "md5": "f0d628c3a0080334e81b7fb7e2f5deae"
+          "size": 67465,
+          "sha512": "2c2302547bff32392e289adfbb903391acf12edb33bb101aa7d28ed16e200461e25ea5a26ccc215fbf501ffa89d771e8c5c5ff4e5206a54e431cebe08de82e77",
+          "sha256": "db23c133556a03df178090eef482ce427ae33f8e2d639ee82bdb6911b79b01e3",
+          "sha1": "8e7be155fbeb2268527d76f700aa8fa22c3850de",
+          "md5": "121402106ba85023fbc12520aa91b238"
         }
       ]
     },
@@ -91,11 +91,11 @@
         {
           "name": "media3-container-1.11.0-alpha01-fongmi-sources.jar",
           "url": "media3-container-1.11.0-alpha01-fongmi-sources.jar",
-          "size": 55494,
-          "sha512": "2ea38b712c0fb3b03cf1e578c4e01647805b39171b40ae2088b6aab45bec4ebffcee027c452abeb2ec42678dbb37ac2007ae643e74a7e3065f49bd83ee449f05",
-          "sha256": "1389b973146391c7eb6cfb80d389cfb70f291a6fc092e1628af1886a6e00294c",
-          "sha1": "3e37f3e1dd1f2998b51802e43fb962dfcb2baed3",
-          "md5": "69d4b0f429e82ce10175949bbbccad6d"
+          "size": 55543,
+          "sha512": "09d7a451127de594579bed9ad80ef58e4dafc5965cc9a08e87213551f89f19c4f1ece8c1d9bee048028e284b60a821161b55002bf8727fe4c00c176f4a4557e4",
+          "sha256": "c681e7071d709b4826099388ae18d7d2713c2f55b768e4440d9c965734674da0",
+          "sha1": "5bfe134e284bdbb24ce0322ae718f2035cec1b02",
+          "md5": "d217b570ee694d05e4d5dba310908de3"
         }
       ]
     }

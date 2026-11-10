@@ -37,6 +37,7 @@ import com.fongmi.android.tv.player.ijk.IjkBufferPolicy;
 import com.fongmi.android.tv.player.ijk.IjkDecodePressurePolicy;
 import com.fongmi.android.tv.player.ijk.IjkRealtimeRecoveryPolicy;
 import com.fongmi.android.tv.setting.IjkPerformanceSetting;
+import com.fongmi.android.tv.setting.PlaybackPerformanceCatalog;
 import com.fongmi.android.tv.setting.PlaybackPerformanceSetting;
 import com.fongmi.android.tv.setting.PlayerSetting;
 import com.fongmi.android.tv.utils.Task;
@@ -120,6 +121,20 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
     private boolean newlyRenderedFirstFrame;
     private boolean renderedFirstFrameSeen;
     private float volume;
+    private final com.fongmi.android.tv.player.PlaybackDiagnosticCollector diagnostics =
+            new com.fongmi.android.tv.player.PlaybackDiagnosticCollector("ijk", "packaged-IjkMediaPlayer");
+    private String diagnosticTrace = "none";
+    private long lastDiagnosticMs;
+
+    void setDiagnosticTrace(String trace) { diagnosticTrace = trace; }
+
+    private void diagnosticEvent(String stage, int what, int extra, boolean error) {
+        diagnostics.emit(diagnostics.context(), "ijk.event", "IMediaPlayer.Listener", "ijk-instance; callback-media-unconfirmed", e -> e
+                .severity(error ? "error" : "info").observed("stage", stage).observed("value", what).observed("errorCode", extra)
+                .observed("state", playbackState).observed("playWhenReady", playWhenReady)
+                .unknown("physicalVideo", com.github.catvod.crawler.diagnostics.DiagnosticEvent.Status.NOT_OBSERVABLE)
+                .unknown("audibility", com.github.catvod.crawler.diagnostics.DiagnosticEvent.Status.NOT_OBSERVABLE));
+    }
 
     IjkSimplePlayer(int decode) {
         super(Looper.getMainLooper());
@@ -423,17 +438,20 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
             else ijk.pause();
         }
         if (!playWhenReady) requestPreload(Math.max(0, position()));
+        diagnosticEvent("play-when-ready", playWhenReady ? 1 : 0, 0, false);
         return Futures.immediateVoidFuture();
     }
 
     @Override
     protected ListenableFuture<?> handleStop() {
+        diagnostics.end("stop-request");
         stopInternal(true);
         return Futures.immediateVoidFuture();
     }
 
     @Override
     protected ListenableFuture<?> handleRelease() {
+        diagnostics.end("release-request");
         if (currentDash) {
             releaseDashSafely();
             return Futures.immediateVoidFuture();
@@ -529,6 +547,7 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
 
     @Override
     public void onPrepared(IMediaPlayer mp) {
+        diagnosticEvent("prepared; not physical output", 0, 0, false);
         prepared = true;
         advanceOpenStage(IjkPlayerEngine.OpenStage.PREPARED);
         playbackState = Player.STATE_READY;
@@ -546,6 +565,7 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
 
     @Override
     public void onCompletion(IMediaPlayer mp) {
+        diagnostics.end("completion");
         setPendingSeek(C.TIME_UNSET);
         playbackState = Player.STATE_ENDED;
         loading = false;
@@ -555,6 +575,7 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
 
     @Override
     public boolean onError(IMediaPlayer mp, int what, int extra) {
+        diagnosticEvent(openStage.label(), what, extra, true);
         lastErrorSnapshot = new IjkPlayerEngine.ErrorSnapshot(
                 what,
                 extra,
@@ -590,6 +611,10 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
 
     @Override
     public void onInfo(IMediaPlayer mp, int what, int extra) {
+        diagnosticEvent(what == IMediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START ? "video-rendering-start"
+                : what == IMediaPlayer.MEDIA_INFO_AUDIO_RENDERING_START ? "audio-rendering-start" : "info", what, extra, false);
+        if (what == IMediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) diagnostics.evidence(diagnostics.context(), true, 3);
+        if (what == IMediaPlayer.MEDIA_INFO_AUDIO_RENDERING_START) diagnostics.evidence(diagnostics.context(), false, 3);
         if (what == IMediaPlayer.MEDIA_INFO_OPEN_INPUT) {
             advanceOpenStage(IjkPlayerEngine.OpenStage.INPUT_OPENED);
         } else if (what == IMediaPlayer.MEDIA_INFO_FIND_STREAM_INFO) {
@@ -650,6 +675,9 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
             lastNativeOffset = offset;
         }
         if (SpiderDebug.isEnabled()) {
+            diagnostics.emit("input.open", "ijk-native-invoke", e -> e.observed("value", event)
+                    .observed("stage", openStage.label()).observed("httpCode", httpStatus > 0 ? httpStatus : null)
+                    .observed("errorCode", nativeError).observed("rangeStart", offset < 0 ? null : offset));
             SpiderDebug.log("ijk",
                     "native event=%d stage=%s http=%d error=%d offset=%d retry=%d",
                     event,
@@ -676,6 +704,7 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
 
     @Override
     public void onVideoSizeChanged(IMediaPlayer mp, int width, int height, int sarNum, int sarDen) {
+        diagnostics.emit("video.output.format", "ijk-video-size", e -> e.observed("width", width).observed("height", height));
         videoSize = new VideoSize(width, height);
         refreshTracks();
         invalidateState();
@@ -687,6 +716,8 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
 
     private void openCurrent() {
         if (mediaItem == null || mediaItem.localConfiguration == null) return;
+        diagnostics.begin(diagnosticTrace, "foreground");
+        lastDiagnosticMs = 0;
         try {
             playbackState = Player.STATE_BUFFERING;
             loading = true;
@@ -750,6 +781,7 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
             invalidateState();
             startStateRefresh();
         } catch (Throwable e) {
+            diagnostics.error(diagnostics.context(), "ijk", "open:" + openStage.label(), e);
             playerError = new PlaybackException(
                     "IJK open failed",
                     e,
@@ -819,7 +851,34 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
         if (mediaItem == null || playbackState == Player.STATE_IDLE || playbackState == Player.STATE_ENDED || playerError != null) return;
         requestPreload(Math.max(0, position()));
         invalidateState();
+        diagnosticSnapshot();
         startStateRefresh();
+    }
+
+    private void diagnosticSnapshot() {
+        if (!com.fongmi.android.tv.player.PlaybackDiagnosticCollector.enabled()) return;
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastDiagnosticMs < 5000) return;
+        lastDiagnosticMs = now;
+        diagnostics.baseline();
+        diagnostics.emit("ijk.runtime", "ijk-public-properties", e -> {
+            e.observed("state", playbackState).observed("positionMs", position()).observed("durationMs", duration() == C.TIME_UNSET ? null : duration())
+                    .observed("playWhenReady", playWhenReady).observed("volume", volume).observed("speed", playbackParameters.speed)
+                    .observed("videoSelected", prepared ? selectedVideoFormat != null : null)
+                    .observed("audioSelected", prepared ? selectedAudioFormat != null : null)
+                    .unknown("audioOutput", com.github.catvod.crawler.diagnostics.DiagnosticEvent.Status.NOT_OBSERVABLE)
+                    .observed("nativeHook", "native-hook-required: IJK AudioTrack/OpenSL write/head/actual route");
+            if (prepared) e.observed("decoderName", ijk.getVideoCodecInfo()).observed("decode", ijk.getVideoDecoder());
+        });
+        if (prepared) {
+            diagnostics.emit("video.output.summary", "ijk-public-properties", e -> e
+                    .observed("frameRate", ijk.getVideoOutputFramesPerSecond()).observed("metricScope", "IJK video-output-fps; not display refresh")
+                    .observed("bytes", ijk.getVideoCachedBytes()));
+            diagnostics.emit("audio.decoder.output", "ijk-public-properties", e -> e.observed("decoderName", ijk.getAudioCodecInfo())
+                    .observed("bytes", ijk.getAudioCachedBytes()).observed("metricScope", "cached input bytes; not accepted output")
+                    .unknown("audibility", com.github.catvod.crawler.diagnostics.DiagnosticEvent.Status.NOT_OBSERVABLE));
+        }
+        com.fongmi.android.tv.player.SystemAudioDiagnosticCollector.snapshot(diagnostics, diagnostics.context());
     }
 
     private void requestPreload(long positionMs) {
@@ -901,10 +960,13 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
 
     private void configureOptions(Uri uri, boolean dash) {
         String url = uri.toString();
-        boolean automatic = PlaybackPerformanceSetting.isAuto(PlayerSetting.IJK);
+        boolean automaticBuffer = PlaybackPerformanceSetting.hasAutomaticOptions(
+                PlayerSetting.IJK,
+                PlaybackPerformanceCatalog.IJK_BUFFER,
+                PlaybackPerformanceCatalog.IJK_WATER);
         IjkBufferOptionPolicy.Decision inputBuffer =
                 IjkBufferOptionPolicy.resolve(
-                        automatic,
+                        automaticBuffer,
                         automaticInputBufferConfig,
                         url,
                         IjkPerformanceSetting.getScene(),
@@ -914,15 +976,56 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
                         IjkPerformanceSetting.getNextWaterMs(),
                         IjkPerformanceSetting.getLastWaterMs());
         appliedInputBufferConfig = inputBuffer.config();
+        if (PlaybackPerformanceSetting.isOverridden(
+                PlayerSetting.IJK,
+                PlaybackPerformanceCatalog.IJK_BUFFER)) {
+            appliedInputBufferConfig = new IjkBufferPolicy.Config(
+                    IjkPerformanceSetting.getBufferMb(),
+                    appliedInputBufferConfig.firstWaterMs(),
+                    appliedInputBufferConfig.nextWaterMs(),
+                    appliedInputBufferConfig.lastWaterMs());
+            inputBuffer = IjkBufferOptionPolicy.withConfig(
+                    inputBuffer,
+                    appliedInputBufferConfig,
+                    PlayerSetting.getBufferBytes(PlayerSetting.IJK));
+        }
+        if (PlaybackPerformanceSetting.isOverridden(
+                PlayerSetting.IJK,
+                PlaybackPerformanceCatalog.IJK_WATER)) {
+            appliedInputBufferConfig = new IjkBufferPolicy.Config(
+                    appliedInputBufferConfig.bufferMb(),
+                    IjkPerformanceSetting.getFirstWaterMs(),
+                    IjkPerformanceSetting.getNextWaterMs(),
+                    IjkPerformanceSetting.getLastWaterMs());
+            inputBuffer = IjkBufferOptionPolicy.withConfig(
+                    inputBuffer,
+                    appliedInputBufferConfig,
+                    PlayerSetting.getBufferBytes(PlayerSetting.IJK));
+        }
+        boolean automaticPictureQueue = PlaybackPerformanceSetting.isAuto(
+                PlayerSetting.IJK,
+                PlaybackPerformanceCatalog.IJK_PICTURE_QUEUE);
+        boolean automaticSoftTune = PlaybackPerformanceSetting.isAuto(
+                PlayerSetting.IJK,
+                PlaybackPerformanceCatalog.IJK_SOFT_TUNE);
         appliedDecodeControlConfig = IjkDecodePressurePolicy.prepareConfig(
-                automatic,
+                automaticPictureQueue || automaticSoftTune,
                 automaticDecodeControlConfig,
                 decode == PlayerEngine.SOFT,
                 IjkPerformanceSetting.getPictureQueue(),
                 configuredSoftTuneMode());
+        appliedDecodeControlConfig = new IjkDecodePressurePolicy.Config(
+                automaticPictureQueue
+                        ? appliedDecodeControlConfig.pictureQueue()
+                        : IjkPerformanceSetting.getPictureQueue(),
+                automaticSoftTune
+                        ? appliedDecodeControlConfig.tuneMode()
+                        : decode == PlayerEngine.SOFT
+                        ? configuredSoftTuneMode()
+                        : IjkDecodePressurePolicy.TuneMode.OFF);
         SpiderDebug.log("ijk-buffer",
                 "action=prepare mode=%s bufferMb=%d maxBufferBytes=%d firstMs=%d nextMs=%d lastMs=%d realtime=%s infbuf=%s",
-                automatic ? "automatic" : "fixed",
+                automaticBuffer ? "automatic" : "fixed",
                 appliedInputBufferConfig.bufferMb(),
                 inputBuffer.maxBufferBytes(),
                 appliedInputBufferConfig.firstWaterMs(),
@@ -957,7 +1060,8 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
         ijk.setOption(IjkMediaPlayer.OPT_CATEGORY_PLAYER, "video-pictq-size", appliedDecodeControlConfig.pictureQueue());
         SpiderDebug.log("ijk-decode",
                 "action=prepare mode=%s requestedDecode=%s pictureQueue=%d tune=%s",
-                automatic ? "automatic" : "fixed",
+                automaticPictureQueue || automaticSoftTune
+                        ? "automatic" : "fixed",
                 decode == PlayerEngine.SOFT ? "software" : "hardware",
                 appliedDecodeControlConfig.pictureQueue(),
                 appliedDecodeControlConfig.tuneMode().label());
@@ -1170,6 +1274,17 @@ class IjkSimplePlayer extends SimpleBasePlayer implements IMediaPlayer.Listener 
                     else if (type == C.TRACK_TYPE_TEXT) selectedText = true;
                 }
                 Format format = buildFormat(info, type, ++index);
+                if (SpiderDebug.isEnabled()) {
+                    boolean actualSelected = type == C.TRACK_TYPE_VIDEO ? info.getStreamIndex() == selectedVideoStream
+                            : type == C.TRACK_TYPE_AUDIO && info.getStreamIndex() == selectedAudioStream;
+                    diagnostics.emit("media.tracks", "ijk-track-info", e -> e.observed("trackId", info.getStreamIndex())
+                            .observed("trackType", type).observed("selected", type == C.TRACK_TYPE_TEXT ? null : actualSelected)
+                            .observed("mime", format.sampleMimeType).observed("codecs", format.codecs)
+                            .observed("sampleRate", format.sampleRate > 0 ? format.sampleRate : null)
+                            .observed("channels", format.channelCount > 0 ? format.channelCount : null));
+                    if (type == C.TRACK_TYPE_VIDEO) diagnostics.evidence(diagnostics.context(), true, 0);
+                    if (type == C.TRACK_TYPE_AUDIO) diagnostics.evidence(diagnostics.context(), false, 0);
+                }
                 if (type == C.TRACK_TYPE_VIDEO && info.getStreamIndex() == selectedVideoStream) actualVideo = format;
                 if (type == C.TRACK_TYPE_AUDIO && info.getStreamIndex() == selectedAudioStream) actualAudio = format;
                 TrackGroup group = new TrackGroup("ijk:" + type + ":" + index, format);

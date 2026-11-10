@@ -25,6 +25,11 @@
             android:text="@string/play_decode" />
 
         <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/playParams"
+            style="@style/Control"
+            android:text="@string/play_params" />
+
+        <com.google.android.material.textview.MaterialTextView
             android:id="@+id/speed"
             style="@style/Control"
             android:fontFeatureSettings="tnum"
@@ -99,6 +104,13 @@
             tools:visibility="visible" />
 
         <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/discMenu"
+            style="@style/Control"
+            android:text="@string/disc_menu_open"
+            android:contentDescription="@string/disc_menu_open_hint"
+            android:visibility="gone" />
+
+        <com.google.android.material.textview.MaterialTextView
             android:id="@+id/prev"
             style="@style/Control"
             android:text="@string/play_prev" />
@@ -112,6 +124,11 @@
             android:id="@+id/episodes"
             style="@style/Control"
             android:text="@string/detail_episode" />
+
+        <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/change2"
+            style="@style/Control"
+            android:text="@string/play_change" />
 
     </androidx.appcompat.widget.LinearLayoutCompat>
 </HorizontalScrollView>

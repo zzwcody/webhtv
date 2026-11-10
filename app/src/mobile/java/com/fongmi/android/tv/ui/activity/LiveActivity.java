@@ -274,6 +274,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
         mBinding.control.back.setOnClickListener(view -> onBack());
         mBinding.control.cast.setOnClickListener(view -> onCast());
         mBinding.control.info.setOnClickListener(view -> onInfo());
+        mBinding.control.osdDiagnostics.setOnClickListener(view -> onPlayParams());
         mBinding.control.play.setOnClickListener(view -> checkPlay());
         mBinding.control.next.setOnClickListener(view -> nextChannel());
         mBinding.control.prev.setOnClickListener(view -> prevChannel());
@@ -293,6 +294,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
         mBinding.control.action.player.setOnClickListener(view -> onPlayerKernel());
         mBinding.control.action.player.setOnLongClickListener(view -> onChooseLong());
         mBinding.control.action.decode.setOnClickListener(view -> onDecode());
+        mBinding.control.action.playParams.setOnClickListener(view -> onPlayParams());
         mBinding.control.action.text.setOnLongClickListener(view -> onTextLong());
         mBinding.control.action.speed.setOnLongClickListener(view -> onSpeedLong());
         mBinding.control.action.getRoot().setOnTouchListener(this::onActionTouch);
@@ -343,6 +345,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
 
     private void setupWindowInsets() {
         ViewCompat.setOnApplyWindowInsetsListener(mBinding.getRoot(), (view, insets) -> {
+            updateLiveStatusBarInset(insets);
             updateLiveListBottomInset(insets);
             return insets;
         });
@@ -866,6 +869,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
 
     private void showControl() {
         if (service() == null || isInPictureInPictureMode()) return;
+        setPlayParamsState();
         boolean embedded = isEmbeddedLiveUi();
         if (!embedded && isVisible(mBinding.recycler)) hideUI(false);
         mBinding.control.info.setVisibility(player().isEmpty() ? View.GONE : View.VISIBLE);
@@ -887,6 +891,22 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
         mBinding.control.getRoot().setVisibility(View.GONE);
         if (mOsd != null) mOsd.setControlsVisible(false);
         App.removeCallbacks(mR1);
+    }
+
+    private void onPlayParams() {
+        if (mOsd == null) return;
+        boolean visible = !mOsd.isDiagnosticsVisible();
+        PlayerSetting.putOsdDiagnostics(visible);
+        mOsd.setDiagnosticsVisible(visible);
+        setPlayParamsState();
+        hideControl();
+    }
+
+    private void setPlayParamsState() {
+        boolean visible = mOsd != null && mOsd.isDiagnosticsVisible();
+        mBinding.control.action.playParams.setSelected(visible);
+        mBinding.control.osdDiagnostics.setSelected(visible);
+        mBinding.control.osdDiagnostics.setAlpha(visible ? 1f : 0.6f);
     }
 
     private void showInfo() {
@@ -1292,7 +1312,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
     @Override
     public void onLiveBackgroundPanel() {
         dismissLiveControlDialog();
-        moveTaskToBack(true);
+        Util.moveToBackground(this);
         setAudioOnly(true);
     }
 
@@ -1333,7 +1353,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
 
         @Override
         public void onAudio() {
-            moveTaskToBack(true);
+            Util.moveToBackground(LiveActivity.this);
             setAudioOnly(true);
         }
     };
@@ -1391,6 +1411,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
                 break;
             case Player.STATE_ENDED:
                 checkEnded();
+                updatePlayControl(false);
                 break;
         }
     }
@@ -1412,13 +1433,12 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
 
     @Override
     protected void onPlayingChanged(boolean isPlaying) {
-        if (isPlaying) {
-            mPiP.update(this, true);
-            mBinding.control.play.setImageResource(androidx.media3.ui.R.drawable.exo_icon_pause);
-        } else if (isPaused()) {
-            mPiP.update(this, false);
-            mBinding.control.play.setImageResource(androidx.media3.ui.R.drawable.exo_icon_play);
-        }
+        if (isPlaying || isPaused()) updatePlayControl(isPlaying);
+    }
+
+    private void updatePlayControl(boolean isPlaying) {
+        mPiP.update(this, isPlaying);
+        mBinding.control.play.setImageResource(isPlaying ? androidx.media3.ui.R.drawable.exo_icon_pause : androidx.media3.ui.R.drawable.exo_icon_play);
     }
 
     @Override
@@ -1802,6 +1822,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
     @Override
     public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, @NonNull Configuration newConfig) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
+        updateLiveStatusBarInset(ViewCompat.getRootWindowInsets(mBinding.getRoot()));
         if (isInPictureInPictureMode) {
             dismissLiveControlDialog();
             hideControl();
@@ -1868,6 +1889,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
             keepLiveMenuVisible();
         }
         embeddedUiMode = embedded;
+        updateLiveStatusBarInset(ViewCompat.getRootWindowInsets(mBinding.getRoot()));
         updateControlInsets();
         updateVideoHeight(videoSize);
         applyLiveResizeMode(LiveSetting.getScale());
@@ -1922,7 +1944,7 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
         if (mBinding.getRoot() instanceof LinearLayoutCompat root) {
             LinearLayoutCompat.LayoutParams params = new LinearLayoutCompat.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0);
             params.weight = 14;
-            root.addView(mBinding.recycler, Math.min(1, root.getChildCount()), params);
+            root.addView(mBinding.recycler, root.indexOfChild(mBinding.video) + 1, params);
         } else if (mBinding.getRoot() instanceof FrameLayout root) {
             root.addView(mBinding.recycler, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START));
         }
@@ -1979,6 +2001,15 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
         else setPadding(mBinding.control.getRoot());
     }
 
+    private void updateLiveStatusBarInset(@Nullable WindowInsetsCompat insets) {
+        if (mBinding.statusBar == null) return;
+        int top = isEmbeddedLiveUi() && insets != null ? insets.getInsets(WindowInsetsCompat.Type.statusBars()).top : 0;
+        ViewGroup.LayoutParams params = mBinding.statusBar.getLayoutParams();
+        if (params.height == top) return;
+        params.height = top;
+        mBinding.statusBar.setLayoutParams(params);
+    }
+
     private void updateLiveListBottomInset(@Nullable WindowInsetsCompat insets) {
         int bottom = isEmbeddedLiveUi() && insets != null ? insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom : 0;
         int extra = isEmbeddedLiveUi() ? bottom + ResUtil.dp2px(6) : 0;
@@ -2027,7 +2058,11 @@ public class LiveActivity extends PlaybackActivity implements CustomKeyDown.List
     @Override
     protected void onStart() {
         super.onStart();
-        if (mOsd != null) mOsd.start();
+        if (mOsd != null) {
+            mOsd.setDiagnosticsVisible(PlayerSetting.isOsdDiagnostics());
+            mOsd.start();
+        }
+        setPlayParamsState();
         setAudioOnly(false);
         setStop(false);
     }

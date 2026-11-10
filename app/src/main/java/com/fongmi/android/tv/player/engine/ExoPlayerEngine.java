@@ -1,28 +1,40 @@
 package com.fongmi.android.tv.player.engine;
 
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
+import android.os.Build;
+
 import androidx.media3.common.C;
 import androidx.media3.common.Effect;
 import androidx.media3.common.Format;
 import androidx.media3.common.MediaEdition;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
+import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.Timeline;
 import androidx.media3.common.Tracks;
+import androidx.media3.exoplayer.ExoPlaybackException;
 import androidx.media3.exoplayer.ExoPlayer;
 
 import com.fongmi.android.tv.App;
 import com.fongmi.android.tv.R;
 import com.fongmi.android.tv.bean.Track;
+import com.fongmi.android.tv.player.AudioPlaybackDiagnostics;
 import com.fongmi.android.tv.player.PlaybackTrace;
 import com.fongmi.android.tv.player.PlaybackResourceClassifier;
 import com.fongmi.android.tv.player.exo.ErrorMsgProvider;
+import com.fongmi.android.tv.player.exo.ExoAudioOutputState;
 import com.fongmi.android.tv.player.exo.ExoDecoderRuntimeProfiles;
 import com.fongmi.android.tv.player.exo.ExoDecoderRuntimeSession;
+import com.fongmi.android.tv.player.exo.ExoCompressedAudioDirectPolicy;
+import com.fongmi.android.tv.player.exo.ExoDolbyVisionPlaybackState;
 import com.fongmi.android.tv.player.exo.ExoFrameSchedulingPlayerSettings;
 import com.fongmi.android.tv.player.exo.ExoFrameSchedulingSessionLock;
 import com.fongmi.android.tv.player.exo.ExoUtil;
+import com.fongmi.android.tv.player.exo.ass.ExoAssSession;
+import com.fongmi.android.tv.player.exo.subtitle.ExoSubtitleSession;
 import com.fongmi.android.tv.player.exo.ExoTunnelingProgressWatchdog;
 import com.fongmi.android.tv.player.exo.ExoTunnelingRuntimeState;
 import com.fongmi.android.tv.player.exo.ExoTunnelingWatchdog;
@@ -35,10 +47,13 @@ import com.fongmi.android.tv.setting.ExoPerformanceSetting;
 import com.fongmi.android.tv.setting.PlaybackPerformanceSetting;
 import com.fongmi.android.tv.setting.PlayerSetting;
 import com.fongmi.android.tv.utils.ResUtil;
+import com.github.catvod.crawler.SpiderDebug;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -48,16 +63,24 @@ public class ExoPlayerEngine implements PlayerEngine {
     private final PreCache preCache;
     private final Set<String> attemptedFormats;
     private final ExoDecoderRuntimeSession decoderRuntimeSession;
+    private final ExoCompressedAudioDirectPolicy compressedAudioDirectPolicy;
+    private final ExoDolbyVisionPlaybackState dolbyVisionPlaybackState;
     private final ExoFrameSchedulingSessionLock frameSchedulingSessionLock;
     private PlaySpec spec;
     private String activeFormat;
     private ExoPlayer player;
+    private ExoAssSession assSession;
+    private ExoSubtitleSession subtitleSession;
     private int decode;
     private boolean playWhenReady;
     private boolean cacheSessionActive;
     private boolean tunnelingFallbackAttempted;
     private boolean tunnelingEnabledForSession;
     private boolean decoderRuntimeEnabledForPlayer;
+    private boolean dv7Hdr10FallbackEnabledForPlayer;
+    private boolean dolbyVisionP81RuntimeFailureObserved;
+    private boolean dolbyVisionFallbackPreparedForNextStart;
+    private PlaySpec dolbyVisionFallbackSpec;
     private ExoFrameSchedulingPlayerSettings frameSchedulingSettings;
     private ExoFrameSchedulingPlayerSettings pendingFrameSchedulingSettings;
     private ExoDecoderRuntimeSession.OutputConfig frameSchedulingOutput;
@@ -83,6 +106,7 @@ public class ExoPlayerEngine implements PlayerEngine {
 
         @Override
         public void onIsPlayingChanged(boolean isPlaying) {
+            if (isPlaying) compressedAudioDirectPolicy.setSelectedAudioFormat(player.getAudioFormat());
             if (isPlaying && firstFrameRendered) {
                 armTunnelingProgressWatchdog();
                 armDecoderRuntimeStableWindow();
@@ -90,6 +114,11 @@ public class ExoPlayerEngine implements PlayerEngine {
                 cancelTunnelingProgressWatchdog();
                 cancelDecoderRuntimeStableWindow();
             }
+        }
+
+        @Override
+        public void onTracksChanged(Tracks tracks) {
+            compressedAudioDirectPolicy.setSelectedAudioFormat(player.getAudioFormat());
         }
 
         @Override
@@ -119,8 +148,12 @@ public class ExoPlayerEngine implements PlayerEngine {
 
     public ExoPlayerEngine(int decode, Player.Listener listener) {
         this.decoderRuntimeSession = ExoDecoderRuntimeProfiles.process().newSession();
+        this.compressedAudioDirectPolicy = new ExoCompressedAudioDirectPolicy(App.get());
+        this.dolbyVisionPlaybackState = new ExoDolbyVisionPlaybackState();
         this.decoderRuntimeEnabledForPlayer =
                 PlaybackPerformanceSetting.isAuto(PlayerSetting.EXO);
+        this.dv7Hdr10FallbackEnabledForPlayer =
+                PlaybackPerformanceSetting.isDv7Hdr10FallbackEnabled();
         this.frameSchedulingSettings =
                 ExoFrameSchedulingPlayerSettings.capture(decode);
         this.frameSchedulingSessionLock =
@@ -129,14 +162,22 @@ public class ExoPlayerEngine implements PlayerEngine {
         this.frameSchedulingOutput = ExoDecoderRuntimeProfiles.currentOutput(
                 ExoUtil.isTunnelingEnabled(decode, false));
         MediaSourceFactory.acquireCacheSession();
+        this.assSession = ExoAssSession.createIfEnabled(App.get(), ExoUtil.isTunnelingEnabled(decode, false));
+        this.subtitleSession = new ExoSubtitleSession();
         try {
             this.player = ExoUtil.buildPlayer(
                     decode,
                     listener,
                     false,
                     decoderRuntimeSession,
-                    frameSchedulingSettings);
+                    frameSchedulingSettings,
+                    dolbyVisionPlaybackState,
+                    compressedAudioDirectPolicy,
+                    assSession,
+                    subtitleSession);
         } catch (RuntimeException | Error e) {
+            if (assSession != null) assSession.release();
+            subtitleSession.release();
             MediaSourceFactory.releaseCacheSession();
             throw e;
         }
@@ -155,8 +196,17 @@ public class ExoPlayerEngine implements PlayerEngine {
         return player;
     }
 
+    public ExoAssSession getAssSession() {
+        return assSession;
+    }
+
+    public ExoSubtitleSession getSubtitleSession() {
+        return subtitleSession;
+    }
+
     @Override
     public void release() {
+        compressedAudioDirectPolicy.resetOutputProgress();
         Runnable cacheRelease = null;
         if (cacheSessionActive) {
             cacheSessionActive = false;
@@ -168,6 +218,12 @@ public class ExoPlayerEngine implements PlayerEngine {
         cancelDecoderRuntimeStableWindow();
         finishDecoderRuntimeAttempt();
         PlaybackAnalyticsListener.finishSession(player.getCurrentPosition());
+        dolbyVisionPlaybackState.reset();
+        dolbyVisionP81RuntimeFailureObserved = false;
+        dolbyVisionFallbackPreparedForNextStart = false;
+        dolbyVisionFallbackSpec = null;
+        if (assSession != null) assSession.release();
+        subtitleSession.release();
         player.release();
     }
 
@@ -175,25 +231,37 @@ public class ExoPlayerEngine implements PlayerEngine {
     public Player rebuild(Player.Listener listener) {
         ExoFrameSchedulingPlayerSettings schedulingSettings =
                 settingsForRebuild();
+        compressedAudioDirectPolicy.resetOutputProgress();
         preCache.stop("engine-rebuild");
         cancelTunnelingWatchdog();
         cancelTunnelingProgressWatchdog();
         cancelDecoderRuntimeStableWindow();
         finishDecoderRuntimeAttempt();
         PlaybackAnalyticsListener.finishSession(player.getCurrentPosition());
+        dolbyVisionPlaybackState.resetAttempt();
+        if (assSession != null) assSession.release();
+        subtitleSession.release();
         player.release();
         PlaybackTrace.log("player-engine", getPlaybackTraceId(), "rebuild decode=%d", decode);
         tunnelingEnabledForSession = ExoUtil.isTunnelingEnabled(decode, tunnelingFallbackAttempted);
         decoderRuntimeEnabledForPlayer =
                 PlaybackPerformanceSetting.isAuto(PlayerSetting.EXO);
+        dv7Hdr10FallbackEnabledForPlayer =
+                PlaybackPerformanceSetting.isDv7Hdr10FallbackEnabled();
         frameSchedulingOutput = ExoDecoderRuntimeProfiles.currentOutput(
                 tunnelingEnabledForSession);
+        assSession = ExoAssSession.createIfEnabled(App.get(), tunnelingEnabledForSession);
+        subtitleSession = new ExoSubtitleSession();
         player = ExoUtil.buildPlayer(
                 decode,
                 listener,
                 tunnelingFallbackAttempted,
                 decoderRuntimeSession,
-                schedulingSettings);
+                schedulingSettings,
+                dolbyVisionPlaybackState,
+                compressedAudioDirectPolicy,
+                assSession,
+                subtitleSession);
         frameSchedulingSettings = schedulingSettings;
         frameSchedulingSessionLock.onRendererRebuilt(
                 schedulingSettings.decision());
@@ -211,6 +279,39 @@ public class ExoPlayerEngine implements PlayerEngine {
         pendingFrameSchedulingSettings = null;
         frameSchedulingSessionLock.lockForNextPlayback(desired.decision());
         return false;
+    }
+
+    public boolean requiresDv7Hdr10FallbackRebuild() {
+        return dv7Hdr10FallbackEnabledForPlayer
+                != PlaybackPerformanceSetting
+                .isDv7Hdr10FallbackEnabled();
+    }
+
+    /**
+     * Arms the one-shot HDR10 retry for a DV7-to-P8.1 attempt that never renders
+     * its first frame. This is deliberately narrower than the decoder-error
+     * fallback: the P8.1 conversion must already be active for this session.
+     */
+    public boolean prepareDv7Hdr10FallbackForFirstFrameTimeout() {
+        ExoDolbyVisionPlaybackState.Snapshot snapshot =
+                dolbyVisionPlaybackState.snapshot();
+        if (!isHard()
+                || firstFrameRendered
+                || spec == null
+                || dolbyVisionPlaybackState.isHdr10FallbackRequested()
+                || !(snapshot.p81ConversionActive()
+                        || dolbyVisionPlaybackState.isP81ConversionAttempted())
+                || dolbyVisionFallbackPreparedForNextStart) {
+            return false;
+        }
+        dolbyVisionFallbackPreparedForNextStart = true;
+        dolbyVisionFallbackSpec = spec;
+        dolbyVisionPlaybackState.requestHdr10Fallback();
+        PlaybackTrace.log(
+                "exo-dv",
+                getPlaybackTraceId(),
+                "first-frame timeout; prepare one-shot HDR10 fallback");
+        return true;
     }
 
     private ExoFrameSchedulingPlayerSettings settingsForRebuild() {
@@ -232,7 +333,11 @@ public class ExoPlayerEngine implements PlayerEngine {
     }
 
     public boolean disableTunnelingForSession() {
-        if (!tunnelingEnabledForSession || tunnelingFallbackAttempted) return false;
+        // A confirmed P8.1 decoder failure must retry as HDR10, not rebuild the
+        // same failing P8.1 path once merely to disable tunneling.
+        if (dolbyVisionP81RuntimeFailureObserved
+                || !tunnelingEnabledForSession
+                || tunnelingFallbackAttempted) return false;
         tunnelingFallbackAttempted = true;
         tunnelingEnabledForSession = false;
         frameSchedulingOutput = ExoDecoderRuntimeProfiles.currentOutput(false);
@@ -383,6 +488,7 @@ public class ExoPlayerEngine implements PlayerEngine {
 
     @Override
     public void start(PlaySpec spec, boolean playWhenReady) {
+        prepareDolbyVisionForStart(spec);
         finishDecoderRuntimeAttempt();
         lockCompatibleFrameSchedulingDecision();
         this.spec = spec;
@@ -399,6 +505,7 @@ public class ExoPlayerEngine implements PlayerEngine {
 
     @Override
     public void start(PlaySpec spec, long position, boolean playWhenReady) {
+        prepareDolbyVisionForStart(spec);
         finishDecoderRuntimeAttempt();
         lockCompatibleFrameSchedulingDecision();
         this.spec = spec;
@@ -415,6 +522,7 @@ public class ExoPlayerEngine implements PlayerEngine {
 
     @Override
     public void restart(PlaySpec spec, long position, boolean playWhenReady) {
+        prepareDolbyVisionForStart(spec);
         finishDecoderRuntimeAttempt();
         this.spec = spec;
         this.activeFormat = spec.getFormat();
@@ -441,10 +549,12 @@ public class ExoPlayerEngine implements PlayerEngine {
 
     @Override
     public void stop() {
+        compressedAudioDirectPolicy.resetOutputProgress();
         preCache.stop("player-stop");
         cancelDecoderRuntimeStableWindow();
         finishDecoderRuntimeAttempt();
         PlaybackAnalyticsListener.finishSession(player.getCurrentPosition());
+        subtitleSession.reset();
         player.stop();
     }
 
@@ -484,12 +594,39 @@ public class ExoPlayerEngine implements PlayerEngine {
 
     @Override
     public void setTrack(List<Track> tracks) {
-        TrackUtil.setTrackSelection(player, tracks);
+        List<Track> allowed = new ArrayList<>(tracks.size());
+        for (Track track : tracks) {
+            if (subtitleSession.canSelectPrimary(player, track)) allowed.add(track);
+        }
+        if (!allowed.isEmpty()) TrackUtil.setTrackSelection(player, allowed);
     }
 
     @Override
     public void resetTrack() {
+        subtitleSession.reset();
         TrackUtil.reset(player);
+    }
+
+    @Override
+    public boolean supportsSecondarySubtitle() {
+        return true;
+    }
+
+    @Override
+    public boolean isPrimarySubtitleSelected(Format format) {
+        return subtitleSession.isPrimarySelected(format);
+    }
+
+    @Override
+    public boolean isSecondarySubtitleSelected(Format format) {
+        return subtitleSession.isSecondarySelected(format);
+    }
+
+    @Override
+    public void setSecondarySubtitleTrack(Track track) {
+        boolean selected = subtitleSession.selectSecondary(player, track);
+        PlaybackTrace.log("exo-subtitle", getPlaybackTraceId(), "role=secondary accepted=%s disabled=%s",
+                selected, track == null || track.isDisabled());
     }
 
     @Override
@@ -514,7 +651,16 @@ public class ExoPlayerEngine implements PlayerEngine {
 
     @Override
     public void setVideoEffects(List<Effect> effects) {
+        if (SpiderDebug.isEnabled()) {
+            Format format = getVideoFormat();
+            SpiderDebug.log("lut-exo", "set effects=%d state=%d position=%d video=%s",
+                    effects == null ? 0 : effects.size(),
+                    player.getPlaybackState(),
+                    player.getCurrentPosition(),
+                    format == null ? "unknown" : format.width + "x" + format.height + "/" + format.sampleMimeType);
+        }
         player.setVideoEffects(effects);
+        com.fongmi.android.tv.player.exo.ExoDiagnosticCollector.effects(player, effects);
     }
 
     @Override
@@ -545,6 +691,128 @@ public class ExoPlayerEngine implements PlayerEngine {
                 "",
                 "",
                 currentAnalyticsSession ? tunnelingEnabledForSession : null);
+    }
+
+    @Override
+    public AudioPlaybackDiagnostics.Snapshot getAudioPlaybackDiagnostics() {
+        PlaybackAnalyticsListener.Snapshot analytics =
+                PlaybackAnalyticsListener.getSnapshot();
+        boolean currentAnalyticsSession = !PlaybackTrace.NONE.equals(
+                getPlaybackTraceId()) && getPlaybackTraceId().equals(
+                PlaybackAnalyticsListener.getPlaybackTraceId());
+        Format selected = currentAnalyticsSession && analytics.audioFormat() != null
+                ? analytics.audioFormat()
+                : TrackUtil.explicitlySelectedFormat(getCurrentTracks(), C.TRACK_TYPE_AUDIO);
+        AudioPlaybackDiagnostics.Track original =
+                AudioPlaybackDiagnostics.track(selected, "");
+        ExoAudioOutputState.Snapshot output =
+                currentAnalyticsSession
+                        ? compressedAudioDirectPolicy.getAudioOutputSnapshot()
+                        : ExoAudioOutputState.Snapshot.empty();
+        String decoderName = currentAnalyticsSession
+                ? analytics.audioDecoderName() : "";
+        PlaybackException error = player == null ? null : player.getPlayerError();
+        if (isAudioDiagnosticsFailure(error, selected)) {
+            AudioPlaybackDiagnostics.FailureReason failureReason =
+                    AudioPlaybackDiagnostics.failureReason(error.errorCode);
+            AudioPlaybackDiagnostics.DecodeMode attemptedDecode = audioDecodeMode(
+                    original, decoderName);
+            AudioPlaybackDiagnostics.OutputMode attemptedOutput = output.offload()
+                    ? AudioPlaybackDiagnostics.OutputMode.OFFLOAD
+                    : AudioPlaybackDiagnostics.OutputMode.UNKNOWN;
+            return new AudioPlaybackDiagnostics.Snapshot(original, original,
+                    attemptedDecode, decoderName, attemptedOutput, 0, 0, false,
+                    "", AudioPlaybackDiagnostics.lastAttemptLevel(
+                            failureReason, attemptedOutput, attemptedDecode),
+                    AudioPlaybackDiagnostics.RuntimeState.FAILED, failureReason);
+        }
+        if (!output.initialized()) {
+            return new AudioPlaybackDiagnostics.Snapshot(original, original,
+                    AudioPlaybackDiagnostics.DecodeMode.UNKNOWN,
+                    decoderName,
+                    AudioPlaybackDiagnostics.OutputMode.UNKNOWN,
+                    0, 0, false, "");
+        }
+        AudioPlaybackDiagnostics.OutputMode outputMode = output.offload()
+                ? AudioPlaybackDiagnostics.OutputMode.OFFLOAD
+                : androidx.media3.common.util.Util.isEncodingLinearPcm(output.encoding())
+                ? AudioPlaybackDiagnostics.OutputMode.PCM
+                : AudioPlaybackDiagnostics.OutputMode.PASSTHROUGH;
+        AudioPlaybackDiagnostics.Track active = outputMode
+                == AudioPlaybackDiagnostics.OutputMode.PCM
+                ? original
+                : AudioPlaybackDiagnostics.encodedTrack(original, output.encoding());
+        String reason = isDtsCoreDowngrade(original, active)
+                ? "dts-hd-core" : "";
+        AudioPlaybackDiagnostics.DecodeMode decodeMode = outputMode
+                == AudioPlaybackDiagnostics.OutputMode.PCM
+                ? audioDecodeMode(active, decoderName)
+                : AudioPlaybackDiagnostics.DecodeMode.NONE;
+        return new AudioPlaybackDiagnostics.Snapshot(original, active,
+                decodeMode, decoderName, outputMode, output.channels(),
+                output.sampleRate(), output.tunneling(), reason);
+    }
+
+    private boolean isAudioDiagnosticsFailure(PlaybackException error, Format selectedAudio) {
+        if (error == null) return false;
+        if (isAudioOutputFailure(error)) return true;
+        AudioPlaybackDiagnostics.FailureReason reason =
+                AudioPlaybackDiagnostics.failureReason(error.errorCode);
+        if (reason != AudioPlaybackDiagnostics.FailureReason.DECODER_INIT
+                && reason != AudioPlaybackDiagnostics.FailureReason.DECODER_RUNTIME) {
+            return false;
+        }
+        if (error instanceof ExoPlaybackException exoError
+                && exoError.type == ExoPlaybackException.TYPE_RENDERER) {
+            if (exoError.rendererFormat != null) {
+                return MimeTypes.isAudio(exoError.rendererFormat.sampleMimeType);
+            }
+            return TrackUtil.explicitlySelectedFormat(
+                    getCurrentTracks(), C.TRACK_TYPE_VIDEO) == null;
+        }
+        return selectedAudio != null && MimeTypes.isAudio(selectedAudio.sampleMimeType);
+    }
+
+    @Override
+    public VideoPlaybackDetails getVideoPlaybackDetails() {
+        PlaybackAnalyticsListener.Snapshot analytics =
+                PlaybackAnalyticsListener.getSnapshot();
+        boolean currentAnalyticsSession = !PlaybackTrace.NONE.equals(
+                getPlaybackTraceId()) && getPlaybackTraceId().equals(
+                PlaybackAnalyticsListener.getPlaybackTraceId());
+        ExoDolbyVisionPlaybackState.Snapshot fallback =
+                dolbyVisionPlaybackState.snapshot();
+        boolean transformed = fallback.hdr10FallbackActive()
+                || fallback.p81ConversionActive();
+        Format selected = TrackUtil.explicitlySelectedFormat(
+                getCurrentTracks(), C.TRACK_TYPE_VIDEO);
+        Format runtime = currentAnalyticsSession
+                ? analytics.videoFormat() : null;
+        Format source = transformed
+                && fallback.sourceFormat() != null
+                ? fallback.sourceFormat()
+                : selected != null ? selected : runtime;
+        Format output = transformed
+                && fallback.outputFormat() != null
+                ? fallback.outputFormat()
+                : runtime != null ? runtime : player.getVideoFormat();
+        int[] profileLevel = dolbyVisionProfileLevel(source);
+        String sourceCodecs = source == null || source.codecs == null
+                ? "" : source.codecs;
+        String decodedCodec = output == null ? ""
+                : output.codecs != null && !output.codecs.isBlank()
+                ? output.codecs
+                : output.sampleMimeType == null ? "" : output.sampleMimeType;
+        return new VideoPlaybackDetails(
+                sourceCodecs,
+                profileLevel[0],
+                profileLevel[1],
+                decodedCodec,
+                currentAnalyticsSession ? analytics.videoDecoderName() : "",
+                "",
+                output == null ? null : output.colorInfo,
+                fallback.hdr10FallbackActive(),
+                fallback.p81ConversionActive());
     }
 
     @Override
@@ -579,6 +847,17 @@ public class ExoPlayerEngine implements PlayerEngine {
 
     @Override
     public ErrorAction handleError(PlaybackException e) {
+        if ((isAudioOutputFailure(e)
+                || compressedAudioDirectPolicy.requestPcmFallbackForStuckPlayback(e))
+                && compressedAudioDirectPolicy.consumePcmFallbackRequest()) {
+            if (retryAudioOutputWithPcm()) {
+                PlaybackTrace.log(
+                        "player-engine",
+                        getPlaybackTraceId(),
+                        "audio output direct failed; restarted current item with PCM");
+                return ErrorAction.RECOVERED;
+            }
+        }
         ErrorAction action = switch (e.errorCode) {
             case PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> seekToDefaultPosition();
             case PlaybackException.ERROR_CODE_DECODER_INIT_FAILED, PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED, PlaybackException.ERROR_CODE_DECODING_FAILED -> ErrorAction.DECODE;
@@ -589,20 +868,87 @@ public class ExoPlayerEngine implements PlayerEngine {
         return action;
     }
 
+    private boolean retryAudioOutputWithPcm() {
+        if (player == null || spec == null) return false;
+        long position = Math.max(0, player.getCurrentPosition());
+        boolean shouldPlay = playWhenReady;
+        preCache.stop("audio-output-pcm-fallback");
+        try {
+            startInternal(position, shouldPlay, true);
+            if (SpiderDebug.isEnabled()) {
+                SpiderDebug.log(
+                        "exo-audio-direct",
+                        "fallback=pcm position=%d play=%s format=%s",
+                        position,
+                        shouldPlay,
+                        activeFormat);
+            }
+            return true;
+        } catch (RuntimeException error) {
+            PlaybackTrace.log(
+                    "player-engine",
+                    getPlaybackTraceId(),
+                    "audio output PCM fallback failed type=%s message=%s",
+                    error.getClass().getSimpleName(),
+                    error.getMessage());
+            return false;
+        }
+    }
+
+    private static boolean isAudioOutputFailure(PlaybackException error) {
+        if (error == null) return false;
+        return error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
+                || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED
+                || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_INIT_FAILED
+                || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_WRITE_FAILED;
+    }
+
     public boolean observeDecoderRuntimeFailure(PlaybackException error) {
-        if (!decoderRuntimeEnabledForPlayer || !isHard() || error == null) return false;
+        if (!isHard() || error == null) return false;
         cancelDecoderRuntimeStableWindow();
-        return decoderRuntimeSession.recordFatalFailure(
-                decoderRuntimeEvidence(error),
+        ExoDecoderRuntimeSession.Evidence evidence = decoderRuntimeEvidence(error);
+        ExoDolbyVisionPlaybackState.Snapshot snapshot =
+                dolbyVisionPlaybackState.snapshot();
+        dolbyVisionP81RuntimeFailureObserved = !dolbyVisionPlaybackState
+                .isHdr10FallbackRequested()
+                && (snapshot.p81ConversionActive()
+                        || dolbyVisionPlaybackState.isP81ConversionAttempted());
+        boolean observed = decoderRuntimeEnabledForPlayer
+                && decoderRuntimeSession.recordFatalFailure(
+                evidence,
                 error.errorCode,
                 android.os.SystemClock.elapsedRealtime(),
                 System.currentTimeMillis());
+        return dolbyVisionP81RuntimeFailureObserved || observed;
     }
 
     public boolean prepareDecoderRuntimeFallback() {
-        return decoderRuntimeEnabledForPlayer
+        if (dolbyVisionP81RuntimeFailureObserved) {
+            dolbyVisionP81RuntimeFailureObserved = false;
+            if (!isHard()
+                    || spec == null
+                    || dolbyVisionPlaybackState.isHdr10FallbackRequested()
+                    || dolbyVisionFallbackPreparedForNextStart) {
+                return false;
+            }
+            dolbyVisionFallbackPreparedForNextStart = true;
+            dolbyVisionFallbackSpec = spec;
+            dolbyVisionPlaybackState.requestHdr10Fallback();
+            PlaybackTrace.log(
+                    "exo-dv",
+                    getPlaybackTraceId(),
+                    "P8.1 decoder failed; prepare one-shot HDR10 fallback");
+            return true;
+        }
+        boolean prepared = decoderRuntimeEnabledForPlayer
                 && isHard()
                 && decoderRuntimeSession.prepareRuntimeFallback();
+        if (!prepared) return false;
+        return true;
+    }
+
+    public boolean isDolbyVisionP81RuntimeFailurePending() {
+        return dolbyVisionP81RuntimeFailureObserved;
     }
 
     public void stopAutomaticPreload(String reason) {
@@ -638,12 +984,18 @@ public class ExoPlayerEngine implements PlayerEngine {
     }
 
     private void startInternal(long position, boolean playWhenReady) {
+        startInternal(position, playWhenReady, false);
+    }
+
+    private void startInternal(long position, boolean playWhenReady, boolean pcmRetry) {
+        compressedAudioDirectPolicy.prepareForPlayback(spec.getUrl(), pcmRetry);
         this.playWhenReady = playWhenReady;
         firstFrameRendered = false;
         cancelTunnelingProgressWatchdog();
         cancelDecoderRuntimeStableWindow();
         armTunnelingWatchdog();
         finishDecoderRuntimeAttempt();
+        dolbyVisionPlaybackState.resetAttempt();
         PlaybackAnalyticsListener.finishSession(player.getCurrentPosition());
         PlaybackAnalyticsListener.beginSession(
                 spec.getPlaybackTraceId(),
@@ -660,6 +1012,8 @@ public class ExoPlayerEngine implements PlayerEngine {
         ExoPerformanceSetting.beginAutoSession();
         if (!playWhenReady) player.pause();
         MediaItem item = ExoUtil.getMediaItem(spec.copyWithFormat(activeFormat), decode);
+        item = com.fongmi.android.tv.player.exo.ExoDiagnosticCollector.prepare(player, item, spec.getPlaybackTraceId());
+        subtitleSession.reset();
         player.setMediaItem(item, position);
         preCache.start(player, item, spec.getPlaybackTraceId(), spec.getPlaybackRoute());
         player.prepare();
@@ -672,6 +1026,27 @@ public class ExoPlayerEngine implements PlayerEngine {
                 currentDecoderRuntimeEvidence(),
                 android.os.SystemClock.elapsedRealtime(),
                 System.currentTimeMillis());
+    }
+
+    private void prepareDolbyVisionForStart(PlaySpec nextSpec) {
+        if (dolbyVisionFallbackPreparedForNextStart
+                && isSameDolbyVisionPlayback(dolbyVisionFallbackSpec, nextSpec)) {
+            dolbyVisionPlaybackState.resetAttempt();
+        } else {
+            dolbyVisionPlaybackState.reset();
+        }
+        dolbyVisionFallbackPreparedForNextStart = false;
+        dolbyVisionFallbackSpec = null;
+        dolbyVisionP81RuntimeFailureObserved = false;
+    }
+
+    static boolean isSameDolbyVisionPlayback(
+            PlaySpec expected, PlaySpec actual) {
+        if (expected == actual) return true;
+        if (expected == null || actual == null) return false;
+        return Objects.equals(expected.getPlaybackTraceId(), actual.getPlaybackTraceId())
+                && Objects.equals(expected.getKey(), actual.getKey())
+                && Objects.equals(expected.getUrl(), actual.getUrl());
     }
 
     private ExoDecoderRuntimeSession.Evidence currentDecoderRuntimeEvidence() {
@@ -712,6 +1087,76 @@ public class ExoPlayerEngine implements PlayerEngine {
         return lower.contains(".secure")
                 || lower.contains("secure.decoder")
                 || lower.endsWith("-secure");
+    }
+
+    private AudioPlaybackDiagnostics.DecodeMode audioDecodeMode(
+            AudioPlaybackDiagnostics.Track track, String decoderName) {
+        if (track != null && "PCM".equalsIgnoreCase(track.codec())) {
+            return AudioPlaybackDiagnostics.DecodeMode.NONE;
+        }
+        if (decoderName == null || decoderName.isBlank()) {
+            return AudioPlaybackDiagnostics.DecodeMode.UNKNOWN;
+        }
+        String lower = decoderName.toLowerCase(Locale.US);
+        if (lower.startsWith("omx.google.") || lower.startsWith("c2.android.")
+                || lower.contains("ffmpeg") || lower.contains("software")
+                || lower.contains("libopus") || lower.contains("libflac")) {
+            return AudioPlaybackDiagnostics.DecodeMode.SOFTWARE;
+        }
+        try {
+            for (MediaCodecInfo info : new MediaCodecList(
+                    MediaCodecList.ALL_CODECS).getCodecInfos()) {
+                if (!info.getName().equalsIgnoreCase(decoderName)) continue;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    return info.isHardwareAccelerated()
+                            ? AudioPlaybackDiagnostics.DecodeMode.HARDWARE
+                            : AudioPlaybackDiagnostics.DecodeMode.SOFTWARE;
+                }
+                return lower.contains("google") || lower.contains("android")
+                        ? AudioPlaybackDiagnostics.DecodeMode.SOFTWARE
+                        : AudioPlaybackDiagnostics.DecodeMode.HARDWARE;
+            }
+        } catch (Throwable ignored) {
+        }
+        if (lower.startsWith("omx.") || lower.startsWith("c2.")) {
+            return AudioPlaybackDiagnostics.DecodeMode.HARDWARE;
+        }
+        return AudioPlaybackDiagnostics.DecodeMode.UNKNOWN;
+    }
+
+    private boolean isDtsCoreDowngrade(AudioPlaybackDiagnostics.Track original,
+                                       AudioPlaybackDiagnostics.Track active) {
+        if (original == null || active == null) return false;
+        String source = original.codec().toLowerCase(Locale.US);
+        return "DTS Core".equals(active.codec())
+                && (source.contains("dts-hd") || source.contains("dts:x"));
+    }
+
+    private static int[] dolbyVisionProfileLevel(Format format) {
+        if (format == null) return new int[]{C.INDEX_UNSET, C.INDEX_UNSET};
+        String codecs = format.codecs == null ? "" : format.codecs.trim();
+        int comma = codecs.indexOf(',');
+        if (comma >= 0) codecs = codecs.substring(0, comma).trim();
+        String lower = codecs.toLowerCase(Locale.US);
+        boolean dolbyVision = MimeTypes.VIDEO_DOLBY_VISION.equals(
+                format.sampleMimeType) || lower.startsWith("dvhe.")
+                || lower.startsWith("dvh1.") || lower.startsWith("dvav.")
+                || lower.startsWith("dva1.");
+        if (!dolbyVision) return new int[]{C.INDEX_UNSET, C.INDEX_UNSET};
+        String[] parts = lower.split("\\.");
+        return new int[]{parseDolbyVisionPart(parts, 1),
+                parseDolbyVisionPart(parts, 2)};
+    }
+
+    private static int parseDolbyVisionPart(String[] parts, int index) {
+        if (parts == null || index < 0 || index >= parts.length) {
+            return C.INDEX_UNSET;
+        }
+        try {
+            return Integer.parseInt(parts[index]);
+        } catch (NumberFormatException ignored) {
+            return C.INDEX_UNSET;
+        }
     }
 
     private ErrorAction seekToDefaultPosition() {

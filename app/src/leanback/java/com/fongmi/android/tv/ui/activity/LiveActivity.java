@@ -214,6 +214,7 @@ public class LiveActivity extends PlaybackActivity implements GroupAdapter.OnCli
         mBinding.control.action.player.setOnClickListener(view -> onPlayerKernel());
         mBinding.control.action.player.setOnLongClickListener(view -> onChooseLong());
         mBinding.control.action.decode.setOnClickListener(view -> onDecode());
+        mBinding.control.action.playParams.setOnClickListener(view -> onPlayParams());
         mBinding.control.action.speed.setOnLongClickListener(view -> onSpeedLong());
         mBinding.video.setOnTouchListener((view, event) -> mKeyDown.onTouchEvent(event));
         mBinding.group.addOnChildViewHolderSelectedListener(new OnChildViewHolderSelectedListener() {
@@ -566,17 +567,18 @@ public class LiveActivity extends PlaybackActivity implements GroupAdapter.OnCli
                 break;
             case Player.STATE_ENDED:
                 checkEnded();
+                updatePlayControl(false);
                 break;
         }
     }
 
     @Override
     protected void onPlayingChanged(boolean isPlaying) {
-        if (isPlaying) {
-            mBinding.control.action.action.setText(R.string.pause);
-        } else if (isPaused()) {
-            mBinding.control.action.action.setText(R.string.play);
-        }
+        if (isPlaying || isPaused()) updatePlayControl(isPlaying);
+    }
+
+    private void updatePlayControl(boolean isPlaying) {
+        mBinding.control.action.action.setText(isPlaying ? R.string.pause : R.string.play);
     }
 
     @Override
@@ -633,6 +635,7 @@ public class LiveActivity extends PlaybackActivity implements GroupAdapter.OnCli
     }
 
     private void showControl(View view) {
+        setPlayParamsState();
         mBinding.control.getRoot().setVisibility(View.VISIBLE);
         mBinding.widget.top.setVisibility(View.VISIBLE);
         if (mOsd != null) mOsd.setControlsVisible(true);
@@ -646,6 +649,19 @@ public class LiveActivity extends PlaybackActivity implements GroupAdapter.OnCli
         mBinding.widget.top.setVisibility(View.GONE);
         if (mOsd != null) mOsd.setControlsVisible(false);
         App.removeCallbacks(mR1);
+    }
+
+    private void onPlayParams() {
+        if (mOsd == null) return;
+        boolean visible = !mOsd.isDiagnosticsVisible();
+        PlayerSetting.putOsdDiagnostics(visible);
+        mOsd.setDiagnosticsVisible(visible);
+        setPlayParamsState();
+        hideControl();
+    }
+
+    private void setPlayParamsState() {
+        mBinding.control.action.playParams.setSelected(mOsd != null && mOsd.isDiagnosticsVisible());
     }
 
     private void hideCenter() {
@@ -1142,6 +1158,7 @@ public class LiveActivity extends PlaybackActivity implements GroupAdapter.OnCli
             mOsd.setDiagnosticsVisible(PlayerSetting.isOsdDiagnostics());
             mOsd.start();
         }
+        setPlayParamsState();
     }
 
     @Override

@@ -18,6 +18,9 @@ import androidx.core.content.ContextCompat;
 import com.fongmi.android.tv.App;
 import com.fongmi.android.tv.BuildConfig;
 import com.fongmi.android.tv.bean.Update;
+import com.fongmi.android.tv.update.GithubProxy;
+import com.fongmi.android.tv.update.OciMirror;
+import com.fongmi.android.tv.update.UpdateSource;
 import com.fongmi.android.tv.utils.WebViewUtil;
 import com.github.catvod.crawler.DebugLogStore;
 import com.github.catvod.crawler.SpiderDebug;
@@ -581,6 +584,20 @@ public class Setting {
 
     public static void logDebugEnvironment(String reason) {
         boolean hardwareAccelerated = (App.get().getApplicationInfo().flags & ApplicationInfo.FLAG_HARDWARE_ACCELERATED) != 0;
+        DebugLogStore.event(new com.github.catvod.crawler.diagnostics.DiagnosticEvent("env.device", "none", "process", 0, 0)
+                .observed("reason", reason).observed("appVersion", BuildConfig.VERSION_NAME).observed("versionCode", BuildConfig.VERSION_CODE)
+                .observed("buildTime", BuildConfig.BUILD_TIME).observed("buildTag", BuildConfig.BUILD_TAG)
+                .observed("gitRevision", BuildConfig.GIT_REVISION).observed("state", BuildConfig.GIT_STATE)
+                .observed("fingerprintDigest", com.fongmi.android.tv.player.NativeLibraryDiagnostics.digestText(Build.FINGERPRINT))
+                .observed("media3Version", BuildConfig.MEDIA3_VERSION).observed("flavor", BuildConfig.FLAVOR_mode)
+                .observed("abi", BuildConfig.FLAVOR_abi).observed("process64Bit", android.os.Process.is64Bit())
+                .observed("android", Build.VERSION.RELEASE).observed("api", Build.VERSION.SDK_INT)
+                .observed("targetSdk", App.get().getApplicationInfo().targetSdkVersion)
+                .observed("manufacturer", Build.MANUFACTURER).observed("model", Build.MODEL)
+                .observed("device", Build.DEVICE).observed("hardwareAccelerated", hardwareAccelerated)
+                .pin("device"));
+        com.fongmi.android.tv.player.NativeLibraryDiagnostics.request();
+        com.fongmi.android.tv.player.PlaybackDiagnosticSession.captureActive(android.os.SystemClock.elapsedRealtime());
         SpiderDebug.log("env", "reason=%s app=%s(%s) mode=%s abi=%s debug=%s hardware=%s android=%s sdk=%s incremental=%s manufacturer=%s brand=%s model=%s device=%s product=%s supportedAbis=%s",
                 reason,
                 BuildConfig.VERSION_NAME,
@@ -652,13 +669,52 @@ public class Setting {
         Prefers.put("update", update);
     }
 
-    public static String getUpdateChannel() {
-        String channel = Prefers.getString("update_channel", Update.CHANNEL_STABLE);
-        return Update.CHANNEL_BETA.equals(channel) ? Update.CHANNEL_BETA : Update.CHANNEL_STABLE;
+    public static String getUpdateSource() {
+        return UpdateSource.normalize(Prefers.getString("update_source", UpdateSource.OCI));
     }
 
-    public static void putUpdateChannel(String channel) {
-        Prefers.put("update_channel", Update.CHANNEL_BETA.equals(channel) ? Update.CHANNEL_BETA : Update.CHANNEL_STABLE);
+    public static void putUpdateSource(String source) {
+        Prefers.put("update_source", UpdateSource.normalize(source));
+    }
+
+    public static String getUpdateGithubProxy() {
+        return GithubProxy.find(Prefers.getString("update_github_proxy", GithubProxy.DIRECT)).id;
+    }
+
+    public static void putUpdateGithubProxy(String proxy) {
+        Prefers.put("update_github_proxy", GithubProxy.find(proxy).id);
+    }
+
+    public static String getUpdateGithubProxyUrl() {
+        return Prefers.getString("update_github_proxy_url");
+    }
+
+    public static void putUpdateGithubProxyUrl(String url) {
+        Prefers.put("update_github_proxy_url", url == null ? "" : url.trim());
+    }
+
+    public static String getUpdateGithubProxyMode() {
+        return GithubProxy.normalizeMode(Prefers.getString("update_github_proxy_mode", GithubProxy.MODE_FULL_URL));
+    }
+
+    public static void putUpdateGithubProxyMode(String mode) {
+        Prefers.put("update_github_proxy_mode", GithubProxy.normalizeMode(mode));
+    }
+
+    public static String getUpdateOciMirror() {
+        return OciMirror.find(Prefers.getString("update_oci_mirror", OciMirror.DEFAULT)).id;
+    }
+
+    public static void putUpdateOciMirror(String mirror) {
+        Prefers.put("update_oci_mirror", OciMirror.find(mirror).id);
+    }
+
+    public static String getUpdateOciMirrorUrl() {
+        return Prefers.getString("update_oci_mirror_url");
+    }
+
+    public static void putUpdateOciMirrorUrl(String url) {
+        Prefers.put("update_oci_mirror_url", url == null ? "" : url.trim());
     }
 
     public static boolean isAdblock() {

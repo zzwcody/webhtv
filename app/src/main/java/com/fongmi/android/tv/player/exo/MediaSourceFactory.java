@@ -2,9 +2,12 @@ package com.fongmi.android.tv.player.exo;
 
 import static androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS;
 
+import android.net.Uri;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PriorityTaskManager;
 import androidx.media3.database.StandaloneDatabaseProvider;
 import androidx.media3.datasource.DataSource;
@@ -25,6 +28,8 @@ import androidx.media3.extractor.ExtractorsFactory;
 import androidx.media3.extractor.ts.TsExtractor;
 
 import com.fongmi.android.tv.App;
+import com.fongmi.android.tv.player.exo.ass.AssFontSet;
+import com.fongmi.android.tv.player.exo.ass.ExoAssSession;
 import com.fongmi.android.tv.player.cache.DiskCacheCapacityPolicy;
 import com.fongmi.android.tv.setting.PlaybackPerformanceSetting;
 import com.fongmi.android.tv.setting.PlayerSetting;
@@ -38,6 +43,7 @@ import com.github.catvod.utils.Path;
 import java.io.File;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 public class MediaSourceFactory implements MediaSource.Factory {
@@ -56,8 +62,22 @@ public class MediaSourceFactory implements MediaSource.Factory {
     private OkHttpDataSource.Factory httpDataSourceFactory;
     private DataSource.Factory dataSourceFactory;
     private ExtractorsFactory extractorsFactory;
+    @Nullable private final ExoDolbyVisionPlaybackState dolbyVisionPlaybackState;
+    @Nullable private final ExoAssSession assSession;
 
     public MediaSourceFactory() {
+        this(null);
+    }
+
+    MediaSourceFactory(
+            @Nullable ExoDolbyVisionPlaybackState dolbyVisionPlaybackState) {
+        this(dolbyVisionPlaybackState, null);
+    }
+
+    MediaSourceFactory(@Nullable ExoDolbyVisionPlaybackState dolbyVisionPlaybackState,
+            @Nullable ExoAssSession assSession) {
+        this.dolbyVisionPlaybackState = dolbyVisionPlaybackState;
+        this.assSession = assSession;
         defaultMediaSourceFactory = new DefaultMediaSourceFactory(getDataSourceFactory(), getExtractorsFactory()).setLoadOnlySelectedTracks(PlaybackPerformanceSetting.isLoadOnlySelectedTracksEnabled());
     }
 
@@ -189,22 +209,62 @@ public class MediaSourceFactory implements MediaSource.Factory {
     public MediaSource createMediaSource(@NonNull MediaItem mediaItem) {
         applyHeaders(getHttpDataSourceFactory(), ExoUtil.extractHeaders(mediaItem));
         String url = mediaItem.requestMetadata.mediaUri != null ? mediaItem.requestMetadata.mediaUri.toString() : "";
+        AssFontSet fonts = assSession == null ? null : assSession.beginMediaFonts();
         if (isConcatenatingUrl(url)) return createConcatenatingMediaSource(mediaItem, url);
+        if (fonts != null || mediaItem.localConfiguration != null && mediaItem.localConfiguration.tag instanceof com.fongmi.android.tv.player.PlaybackDiagnosticCollector.Context) {
+            // Bind the collection to this source's extractors. Old loaders cannot populate a new video.
+            // Container ASS needs its attachments even when no external subtitle was configured.
+            return new DefaultMediaSourceFactory(getDataSourceFactory(), Media3DiagnosticBridge.extractors(buildExtractorsFactory(fonts), mediaItem))
+                    .setLoadOnlySelectedTracks(PlaybackPerformanceSetting.isLoadOnlySelectedTracksEnabled())
+                    .createMediaSource(mediaItem);
+        }
         else return defaultMediaSourceFactory.createMediaSource(mediaItem);
     }
 
     private MediaSource createConcatenatingMediaSource(MediaItem mediaItem, String url) {
         ConcatenatingMediaSource2.Builder builder = new ConcatenatingMediaSource2.Builder();
+        DefaultMediaSourceFactory sourceFactory = new DefaultMediaSourceFactory(getDataSourceFactory(),
+                Media3DiagnosticBridge.extractors(getExtractorsFactory(), mediaItem))
+                .setLoadOnlySelectedTracks(PlaybackPerformanceSetting.isLoadOnlySelectedTracksEnabled());
         for (String split : url.split(CONCAT_SOURCE_SEPARATOR_REGEX)) {
             String[] info = split.split(CONCAT_DURATION_SEPARATOR_REGEX);
-            if (info.length >= 2) builder.add(defaultMediaSourceFactory.createMediaSource(mediaItem.buildUpon().setUri(UrlUtil.uri(info[0])).build()), Long.parseLong(info[1]));
+            if (info.length >= 2) builder.add(sourceFactory.createMediaSource(mediaItem.buildUpon().setUri(UrlUtil.uri(info[0])).build()), Long.parseLong(info[1]));
         }
         return builder.build();
     }
 
     private ExtractorsFactory getExtractorsFactory() {
-        if (extractorsFactory == null) extractorsFactory = new DefaultExtractorsFactory().setTsExtractorFlags(FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS).setTsExtractorTimestampSearchBytes(TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES * 10);
+        if (extractorsFactory == null) extractorsFactory = buildExtractorsFactory(null);
         return extractorsFactory;
+    }
+
+    private ExtractorsFactory buildExtractorsFactory(@Nullable AssFontSet fonts) {
+            ExtractorsFactory defaults = new DefaultExtractorsFactory()
+                    .setTsExtractorFlags(FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS)
+                    .setTsExtractorTimestampSearchBytes(
+                            TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES * 10);
+            ExtractorsFactory withApe = new ExtractorsFactory() {
+                @Override
+                public androidx.media3.extractor.Extractor[] createExtractors() {
+                    return prependApe(defaults.createExtractors());
+                }
+
+                @Override
+                public androidx.media3.extractor.Extractor[] createExtractors(
+                        Uri uri, Map<String, List<String>> responseHeaders) {
+                    return prependApe(defaults.createExtractors(uri, responseHeaders));
+                }
+            };
+            return new DolbyVisionP81ExtractorsFactory(withApe, dolbyVisionPlaybackState, fonts);
+    }
+
+    private static androidx.media3.extractor.Extractor[] prependApe(
+            androidx.media3.extractor.Extractor[] defaults) {
+        androidx.media3.extractor.Extractor[] extractors =
+                new androidx.media3.extractor.Extractor[defaults.length + 1];
+        extractors[0] = new ApeExtractor();
+        System.arraycopy(defaults, 0, extractors, 1, defaults.length);
+        return extractors;
     }
 
     private DataSource.Factory getDataSourceFactory() {
